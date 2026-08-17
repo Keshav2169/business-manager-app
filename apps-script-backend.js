@@ -31,7 +31,7 @@ const CONFIG = {
   COMPANY_GSTIN: "09XXXXXXXXXXXXX",
   COMPANY_PAN:   "XXXXXPXXXXXX",
   COMPANY_PHONE: "+91-XXXXXXXXXX",
-  APP_URL:       "https://your-app.vercel.app",
+  APP_URL:       "https://business-manager-app-rust.vercel.app/",
   PETTY_CASH_FLOAT: 10000,
   LOW_STOCK_ALERT:  true,
   AR_ALERT_DAYS:    60,
