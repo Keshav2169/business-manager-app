@@ -126,7 +126,14 @@ export const setAuthCode = code => { _authCode = code || ""; };
 //    problem behind a misleading "pending sync" state.
 const post = async body => {
   let res;
-  try { res = await fetch(_API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body,key:_KEY,code:_authCode})}); }
+  // IMPORTANT: Content-Type must stay "text/plain" here, NOT "application/json".
+  // Apps Script Web Apps don't implement CORS preflight (no doOptions handler),
+  // so any POST with a non-simple Content-Type gets blocked by the browser
+  // before it's ever sent. text/plain is a CORS-safelisted header, so no
+  // preflight is triggered. The backend still JSON.parses the raw body via
+  // e.postData.contents regardless of the declared Content-Type, so this is
+  // purely a browser-side workaround — no backend change needed.
+  try { res = await fetch(_API,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...body,key:_KEY,code:_authCode})}); }
   catch(e){ const err=new Error(e.message||"Network request failed"); err.isNetworkError=true; throw err; }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
