@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1B3A6B" />
+    <meta name="description" content="Keshav Enterprises Business Suite — Steam Turbine Services, Shamli UP" />
+    <title>KE Business Suite</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.json" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF2F7; -webkit-font-smoothing: antialiased; }
+      #root { height: 100vh; overflow: hidden; }
+      ::-webkit-scrollbar { width: 5px; height: 5px; }
+      ::-webkit-scrollbar-track { background: #EEF2F7; }
+      ::-webkit-scrollbar-thumb { background: #1B3A6B; border-radius: 3px; }
+      select, input, textarea, button { font-family: inherit; }
+
+      /* Visible keyboard-focus ring on every interactive control. Mouse users
+         never see it (:focus-visible), keyboard/screen-reader users always do. */
+      button:focus-visible, input:focus-visible, select:focus-visible,
+      textarea:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+        outline: 2.5px solid #C8961E;
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
+
+      /* ── Mobile breakpoint (≤768px): sidebar becomes a bottom-anchored
+         slide-over drawer instead of squeezing the desktop rail, tables get
+         a horizontal-scroll affordance + larger tap targets. ── */
+      @media (max-width: 768px) {
+        .ke-sidebar { position: fixed !important; inset: 0 auto 0 0 !important; height: 100vh !important; }
+        .ke-sidebar.collapsed-mobile { transform: translateX(-100%); }
+        .ke-main { width: 100% !important; }
+        .ke-topbar { flex-wrap: wrap !important; padding: 8px 12px !important; }
+        .ke-content { padding: 12px !important; }
+        .ke-modal { max-width: 100% !important; width: 100% !important; margin: 0 !important;
+          border-radius: 16px 16px 0 0 !important; align-self: flex-end !important; max-height: 92vh !important; }
+        table { font-size: 12px !important; }
+        button, select, input { min-height: 38px; }
+        .ke-date-pill { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

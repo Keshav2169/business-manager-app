@@ -1,0 +1,12 @@
+{
+  "name": "KE Business Suite",
+  "short_name": "KE Suite",
+  "description": "Keshav Enterprises Business Management",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1B3A6B",
+  "theme_color": "#1B3A6B",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
