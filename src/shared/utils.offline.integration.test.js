@@ -10,13 +10,26 @@ process.env.VITE_API_URL = "https://script.google.com/macros/s/test-deployment/e
 process.env.VITE_API_KEY = "test-key";
 
 const HEADERS = ["Job ID", "FY", "Created At", "Created By", "Client", "Status"];
+const ITEM_HEADERS = ["Invoice No.", "FY", "SR No.", "Item Description", "HSN/SAC Code", "Quantity", "Unit", "Rate (Rs)", "Amount (Rs)", "Created At", "Deleted"];
+// Minimal slice of the real "IndiaMART Leads" headers — just enough columns
+// to exercise the generic append/update/delete/nextSerial/read dispatcher
+// for a NEW sheet name, which is exactly what Phase 2 of
+// indiamart-leads-prompt.md asks to be confirmed (no new backend actions
+// needed — the existing generic CRUD just has to resolve correctly).
+const LEAD_HEADERS = ["Lead ID", "FY", "Created At", "Created By", "Company Name", "Status"];
 let serverRows;
+let serverItemRows;
+let serverLeadRows;
+let callOrder; // records POST action names in the order the mock server received them
 let mode; // "online" | "offline" | "servererror"
 
 function freshServer() {
   serverRows = [
     { "Job ID": "KE/JOB/26-27/001", "FY": "2026-27", "Created At": "10/8/2026, 9:00:00 am", "Created By": "Keshav Sharma", "Client": "Dhampur Sugar Mills", "Status": "Enquiry", _rowNum: 2 },
   ];
+  serverItemRows = [];
+  serverLeadRows = [];
+  callOrder = [];
 }
 
 function mockFetch(url, opts) {
@@ -29,6 +42,7 @@ function mockFetch(url, opts) {
   // "online": act like the Apps Script backend for the handful of actions we exercise.
   if (opts?.method === "POST") {
     const body = JSON.parse(opts.body);
+    callOrder.push(body.action);
     if (body.action === "append") {
       // A row whose Client is literally "FAIL_ME" simulates a genuine
       // (non-network) server-side rejection for that ONE entry — e.g. a
@@ -37,6 +51,12 @@ function mockFetch(url, opts) {
       if (body.row?.[4] === "FAIL_ME") {
         return Promise.resolve({ ok: true, json: async () => ({ error: "Validation failed for this record" }) });
       }
+      if (body.sheet === "IndiaMART Leads") {
+        const obj = {}; LEAD_HEADERS.forEach((h, i) => { obj[h] = body.row[i] ?? ""; });
+        obj._rowNum = serverLeadRows.length + 2;
+        serverLeadRows.push(obj);
+        return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
+      }
       const _rowNum = serverRows.length + 2;
       const obj = {}; HEADERS.forEach((h, i) => { obj[h] = body.row[i] ?? ""; });
       obj._rowNum = _rowNum;
@@ -44,20 +64,52 @@ function mockFetch(url, opts) {
       return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
     }
     if (body.action === "update") {
+      if (body.sheet === "IndiaMART Leads") {
+        const idx = serverLeadRows.findIndex(r => r._rowNum === body.rowIndex);
+        if (idx > -1) LEAD_HEADERS.forEach((h, i) => { if (body.updates[i] !== undefined) serverLeadRows[idx][h] = body.updates[i]; });
+        return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
+      }
       const idx = serverRows.findIndex(r => r._rowNum === body.rowIndex);
       if (idx > -1) HEADERS.forEach((h, i) => { if (body.updates[i] !== undefined) serverRows[idx][h] = body.updates[i]; });
       return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
     }
     if (body.action === "delete") {
+      if (body.sheet === "IndiaMART Leads") {
+        const idx = serverLeadRows.findIndex(r => r._rowNum === body.rowIndex);
+        if (idx > -1) serverLeadRows[idx]["Status"] = "Deleted";
+        return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
+      }
       const idx = serverRows.findIndex(r => r._rowNum === body.rowIndex);
       if (idx > -1) serverRows[idx]["Status"] = "Deleted";
       return Promise.resolve({ ok: true, json: async () => ({ status: "ok" }) });
+    }
+    if (body.action === "saveInvoiceItems") {
+      // A row whose description is literally "FAIL_ITEM" simulates a
+      // genuine server-side rejection of the items write, to test that the
+      // header write never gets attempted in that case.
+      if ((body.items || []).some(r => r[3] === "FAIL_ITEM")) {
+        return Promise.resolve({ ok: true, json: async () => ({ error: "Validation failed for an item row" }) });
+      }
+      // Replace-on-edit: soft-delete existing rows for this invoiceNo, then append fresh ones.
+      serverItemRows.forEach(r => { if (r["Invoice No."] === body.invoiceNo) r["Deleted"] = true; });
+      (body.items || []).forEach(row => {
+        const obj = {}; ITEM_HEADERS.forEach((h, i) => { obj[h] = row[i] ?? ""; });
+        obj._rowNum = serverItemRows.length + 2;
+        serverItemRows.push(obj);
+      });
+      return Promise.resolve({ ok: true, json: async () => ({ status: "ok", count: (body.items || []).length }) });
     }
   }
   // GET (reads + nextSerial + bulkRead)
   const u = new URL(url);
   if (u.searchParams.get("action") === "nextSerial") {
-    return Promise.resolve({ ok: true, json: async () => ({ serial: `KE/JOB/26-27/00${serverRows.length + 1}` }) });
+    // Built from the ACTUAL prefix/sheet/fy params sent, not hardcoded —
+    // this is what lets a test confirm nextSerial("IndiaMART Leads","IM",fy)
+    // really does produce an IM-prefixed id over the wire, not just a JOB
+    // one that happens to look plausible.
+    const prefix = u.searchParams.get("prefix") || "JOB";
+    const fyParam = u.searchParams.get("fy") || "2026-27";
+    return Promise.resolve({ ok: true, json: async () => ({ serial: `KE/${prefix}/${fyParam}/001` }) });
   }
   if (u.searchParams.get("action") === "bulkRead") {
     // Mirrors apps-script-backend.js's bulkRead: one response keyed by sheet
@@ -72,6 +124,13 @@ function mockFetch(url, opts) {
         : { status: "ok", sheet: name, fy: "2026-27", headers: HEADERS, data: [], count: 0 };
     });
     return Promise.resolve({ ok: true, json: async () => out });
+  }
+  if (u.searchParams.get("sheet") === "Sales Invoice Items") {
+    const live = serverItemRows.filter(r => !r["Deleted"]);
+    return Promise.resolve({ ok: true, json: async () => ({ status: "ok", sheet: "Sales Invoice Items", fy: null, headers: ITEM_HEADERS, data: live, count: live.length }) });
+  }
+  if (u.searchParams.get("sheet") === "IndiaMART Leads") {
+    return Promise.resolve({ ok: true, json: async () => ({ status: "ok", sheet: "IndiaMART Leads", fy: u.searchParams.get("fy"), headers: LEAD_HEADERS, data: serverLeadRows, count: serverLeadRows.length }) });
   }
   return Promise.resolve({ ok: true, json: async () => ({ status: "ok", sheet: "Jobs", fy: "2026-27", headers: HEADERS, data: serverRows, count: serverRows.length }) });
 }
@@ -310,5 +369,126 @@ describe("sheetsAPI offline integration", () => {
     expect(serverRows.some(r => r.Client === "Client A")).toBe(true);
     expect(serverRows.some(r => r.Client === "Client C")).toBe(true);
     expect(serverRows.some(r => r.Client === "FAIL_ME")).toBe(false);
+  });
+
+  // ─── Multi-item Sales Invoices (Phase 6 integration tests) ───────────────────
+  it("saveInvoiceItems: saving 3 items writes them before the invoice header, both keyed to the same Invoice No.", async () => {
+    const invoiceNo = "KE/INV/2026-27/900";
+    const itemRows = [
+      ["Turbine Bearing SKF 6310", "84821010", 2, "Pcs", 1200],
+      ["Carbon Seal Ring 50mm", "84842000", 4, "Pcs", 850],
+      ["Mobil DTE Oil 32", "27101980", 1, "Can", 2800],
+    ].map(([description, hsn, qty, unit, rate], i) => [invoiceNo, "2026-27", i + 1, description, hsn, qty, unit, rate, qty * rate, "t", false]);
+
+    const itemsRes = await sheetsAPI.saveInvoiceItems(invoiceNo, "2026-27", itemRows);
+    expect(itemsRes.error).toBeUndefined();
+    expect(itemsRes.count).toBe(3);
+
+    const headerRow = ["KE/INV/2026-27/900", "2026-27", "t", "u", "14/8/2026", "Client X", "", "", "", "", "", 0, 0, 0, 0, 0, 0, 0, "IGST", 0, 0, 0, 0, "No", 0, 0, 0, 0, "30 days", "", "", "", "", "Unpaid", 0, "", "", "", "", ""];
+    await sheetsAPI.append("Sales Invoices", headerRow);
+
+    expect(callOrder).toEqual(["saveInvoiceItems", "append"]);
+
+    const saved = serverItemRows.filter(r => r["Invoice No."] === invoiceNo && !r["Deleted"]);
+    expect(saved).toHaveLength(3);
+    expect(saved.every(r => r["Invoice No."] === invoiceNo)).toBe(true);
+  });
+
+  it("saveInvoiceItems: a simulated items-write failure means the header write is never attempted", async () => {
+    const invoiceNo = "KE/INV/2026-27/901";
+    const badItemRow = [invoiceNo, "2026-27", 1, "FAIL_ITEM", "", 1, "Pcs", 100, 100, "t", false];
+
+    const itemsRes = await sheetsAPI.saveInvoiceItems(invoiceNo, "2026-27", [badItemRow]);
+    expect(itemsRes.error).toMatch(/validation failed/i);
+
+    // Mirrors Invoices.jsx's handleSave: on an items error, return before
+    // ever calling sheetsAPI.append/update for the header row.
+    expect(callOrder).toEqual(["saveInvoiceItems"]);
+    expect(serverRows.some(r => r["Job ID"] === invoiceNo)).toBe(false);
+  });
+
+  it("getInvoiceItems filters to one invoice, excludes soft-deleted rows, and sorts by SR No.", async () => {
+    const invoiceNo = "KE/INV/2026-27/902";
+    const rowsV1 = [
+      [invoiceNo, "2026-27", 2, "Second item", "", 1, "Pcs", 200, 200, "t", false],
+      [invoiceNo, "2026-27", 1, "First item", "", 1, "Pcs", 100, 100, "t", false],
+    ];
+    await sheetsAPI.saveInvoiceItems(invoiceNo, "2026-27", rowsV1);
+    // A different invoice's items must never leak into this invoice's read.
+    await sheetsAPI.saveInvoiceItems("KE/INV/2026-27/903", "2026-27", [["KE/INV/2026-27/903", "2026-27", 1, "Other invoice's item", "", 1, "Pcs", 50, 50, "t", false]]);
+
+    let items = await sheetsAPI.getInvoiceItems(invoiceNo);
+    expect(items.map(i => i.description)).toEqual(["First item", "Second item"]);
+
+    // Edit: replace-on-edit removes "Second item" — soft-deleted rows must not resurrect.
+    const rowsV2 = [[invoiceNo, "2026-27", 1, "First item", "", 1, "Pcs", 100, 100, "t", false]];
+    await sheetsAPI.saveInvoiceItems(invoiceNo, "2026-27", rowsV2);
+    items = await sheetsAPI.getInvoiceItems(invoiceNo);
+    expect(items.map(i => i.description)).toEqual(["First item"]);
+  });
+
+  it("offline queue: a queued saveInvoiceItems write and a queued header append for the same invoice replay in the original order after reconnect", async () => {
+    mode = "offline";
+    const invoiceNo = "DRAFT-INV-1";
+    const itemRows = [[invoiceNo, "2026-27", 1, "Offline item", "", 1, "Pcs", 500, 500, "t", false]];
+    const itemsRes = await sheetsAPI.saveInvoiceItems(invoiceNo, "2026-27", itemRows);
+    expect(itemsRes.status).toBe("queued");
+    const headerRes = await sheetsAPI.append("Jobs", ["DRAFT-JOB-x", "2026-27", "t", "u", "Client", "Enquiry"]);
+    expect(headerRes.status).toBe("queued");
+
+    const queue = await sheetsAPI.getPendingWrites();
+    expect(queue.map(q => q.action)).toEqual(["saveInvoiceItems", "append"]);
+
+    mode = "online";
+    const flush = await sheetsAPI.flushQueue();
+    expect(flush.synced).toBe(2);
+    expect(flush.failed).toBe(0);
+    // The items write reached the mock server BEFORE the header append —
+    // replaying the header first would recreate the exact
+    // wrong-Material-Charges-with-no-line-items problem Phase 2 exists to avoid.
+    expect(callOrder).toEqual(["saveInvoiceItems", "append"]);
+  });
+
+  // ─── IndiaMART Leads (Phase 2 + 6 checks — generic CRUD, no new backend actions) ───
+  it("nextSerial(\"IndiaMART Leads\",\"IM\",fy) produces an IM-prefixed id, not a JOB-prefixed one — confirms the generic dispatcher passes prefix/sheet through correctly", async () => {
+    const serial = await sheetsAPI.nextSerial("IndiaMART Leads", "IM", "2026-27");
+    expect(serial).toBe("KE/IM/2026-27/001");
+  });
+
+  it("append/read round-trip for the new \"IndiaMART Leads\" sheet through the existing generic dispatcher — no sheet-specific backend code needed", async () => {
+    const row = ["KE/IM/2026-27/001", "2026-27", "t", "Keshav Sharma", "Rohilkhand Sugar Works", "New"];
+    const appendRes = await sheetsAPI.append("IndiaMART Leads", row);
+    expect(appendRes.error).toBeUndefined();
+
+    const readRes = await sheetsAPI.read("IndiaMART Leads", "2026-27");
+    expect(readRes.data).toHaveLength(1);
+    expect(readRes.data[0]["Company Name"]).toBe("Rohilkhand Sugar Works");
+  });
+
+  it("update/softDelete round-trip for \"IndiaMART Leads\" through the same generic dispatcher used by every other sheet", async () => {
+    await sheetsAPI.append("IndiaMART Leads", ["KE/IM/2026-27/002", "2026-27", "t", "Keshav Sharma", "Ganga Paper Mills", "New"]);
+    const readRes = await sheetsAPI.read("IndiaMART Leads", "2026-27");
+    const rowIndex = readRes.data[0]._rowNum;
+
+    const updRes = await sheetsAPI.update("IndiaMART Leads", rowIndex, ["KE/IM/2026-27/002", "2026-27", "t", "Keshav Sharma", "Ganga Paper Mills", "Contacted"]);
+    expect(updRes.error).toBeUndefined();
+    let after = await sheetsAPI.read("IndiaMART Leads", "2026-27");
+    expect(after.data[0].Status).toBe("Contacted");
+
+    const delRes = await sheetsAPI.softDelete("IndiaMART Leads", rowIndex);
+    expect(delRes.error).toBeUndefined();
+    after = await sheetsAPI.read("IndiaMART Leads", "2026-27");
+    expect(after.data[0].Status).toBe("Deleted");
+  });
+
+  it("save-failure: a genuine server error on an IndiaMART Leads save surfaces immediately (not queued) — mirrors the Invoices.jsx/Clients.jsx \"stays open, shows red toast\" contract this codebase relies on", async () => {
+    mode = "servererror";
+    const res = await sheetsAPI.append("IndiaMART Leads", ["KE/IM/2026-27/003", "2026-27", "t", "Keshav Sharma", "Elite Cement Works", "New"]);
+    expect(res.error).toMatch(/access denied/i);
+    expect(res.queued).toBeUndefined();
+    // The component's handleSave treats any res.error as _saveFailed, keeps
+    // the modal open, and never fires onRefresh — this confirms the API
+    // layer actually returns the shape (an `error` string, no `queued`
+    // flag) that logic branches on.
   });
 });

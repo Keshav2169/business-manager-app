@@ -40,6 +40,27 @@ export function mergeQueueIntoResult(sheet, fy, result, queue) {
   let data = result.data ? result.data.slice() : [];
 
   relevant.forEach(q => {
+    if (q.action === "saveInvoiceItems") {
+      // Replace-on-edit, mirrored client-side: once this entry syncs, the
+      // backend soft-deletes every existing row for q.invoiceNo and appends
+      // q.items fresh — so the optimistic view shows ONLY the queued set
+      // for that invoice (not merged with whatever synced rows exist),
+      // otherwise a queued edit that removed a line item would still show
+      // it here until sync actually catches up.
+      if (fy && q.fy && q.fy !== fy) return;
+      data = data.filter(r => r["Invoice No."] !== q.invoiceNo);
+      (q.items || []).forEach(row => {
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = row?.[i] ?? ""; });
+        obj._rowNum = null;
+        obj._pendingSync = true;
+        obj._localId = q.localId;
+        obj._queuedAction = "saveInvoiceItems";
+        if (q.status === "error") { obj._syncError = q.errorMsg; }
+        data.push(obj);
+      });
+      return;
+    }
     if (q.action === "append") {
       // Only surface a queued append under the FY tab it belongs to (or
       // when the caller asked for all FYs at once).

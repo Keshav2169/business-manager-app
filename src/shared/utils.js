@@ -31,7 +31,20 @@ export const calcClosing   = (o,p,i) => Math.max(0,(+o||0)+(+p||0)-(+i||0));
 export const calcAnnualDep = (c,ic,r)=> Math.round(((+c||0)+(+ic||0))*(+r||0)/100);
 
 // ─── GST / INVOICE CALCULATIONS ──────────────────────────────────────────────
+// Sums an items array [{qty,rate,...}] into a materialCharges total. Exported
+// separately from calcInvoice so the Invoices modal can show a live running
+// total in the item table itself, not just in the final CalcStrip.
+export const calcItemsTotal = (items) => (items||[]).reduce((s,i)=>s+(+i.qty||0)*(+i.rate||0),0);
+
 export const calcInvoice = (form) => {
+  // Backward compatibility: an invoice with a populated `items` array gets
+  // materialCharges computed from it; one with an empty/missing `items`
+  // (every invoice saved before this feature shipped, or a new invoice with
+  // no rows added yet) falls back to the legacy typed-in materialCharges
+  // number exactly as before. Never force old invoices through the new path.
+  const itemsMaterial = (form.items && form.items.length) ? calcItemsTotal(form.items) : null;
+  const materialCharges = itemsMaterial!==null ? itemsMaterial : (+form.materialCharges||0);
+  form = { ...form, materialCharges };
   const sub    = [+form.labourCharges,+form.materialCharges,+form.travelCharges,+form.otherCharges].reduce((a,b)=>a+b,0);
   const taxable= sub - (+form.discount||0);
   const gstPct = +form.gstPct || 18;
@@ -42,7 +55,11 @@ export const calcInvoice = (form) => {
   const igst   = form.gstType==="IGST" ? gstAmt : 0;
   const grand  = taxable + gstAmt;
   const tdsAmt = form.tdsApplicable==="Yes" ? Math.round(taxable*(+form.tdsRate||1)/100) : 0;
-  return { sub, taxable, gstAmt, cgst, sgst, igst, grand, tdsAmt, netPay:grand-tdsAmt };
+  // materialCharges rides along on the result so buildInvoiceRow can use the
+  // SAME resolved number (items-derived or legacy field) that this
+  // calculation was actually based on, instead of re-reading the possibly-
+  // stale raw form field itself.
+  return { sub, taxable, gstAmt, cgst, sgst, igst, grand, tdsAmt, netPay:grand-tdsAmt, materialCharges };
 };
 export const calcPurchase = (form) => {
   const taxable= (+form.basicAmount||0)-(+form.discount||0);
@@ -100,6 +117,7 @@ export const exportCSV = (filename, cols, rows) => {
 
 // ─── GOOGLE SHEETS API ────────────────────────────────────────────────────────
 import * as offlineDB from "./offlineDB.js";
+import { denormalizeRows } from "./constants.js";
 import { mergeQueueIntoResult, rowsConflict, isNetworkFailure, CREATED_AT_COL, CREATED_BY_COL, CREATED_AT_HEADER, CREATED_BY_HEADER } from "./offlineMerge.js";
 
 const _API = (typeof import.meta!=="undefined"&&import.meta.env?.VITE_API_URL)||"YOUR_APPS_SCRIPT_WEB_APP_URL";
@@ -294,6 +312,39 @@ export const sheetsAPI = {
       return {status:"queued",queued:true,localId,offline:true};
     }
   },
+  // Writes one invoice's full line-item set in a single request: soft-
+  // deletes the invoice's existing item rows, then appends the fresh ones
+  // (see saveInvoiceItems in apps-script-backend.js). `items` is an array
+  // of rows already built by buildInvoiceItemRow — this function doesn't
+  // build rows itself, same convention as append()/update() above.
+  // On a network failure this queues as ONE offline-queue entry (not one
+  // per item), so it replays as a single atomic write on reconnect — see
+  // syncEntry's "saveInvoiceItems" case below.
+  async saveInvoiceItems(invoiceNo,fy,items){
+    if(IS_DEMO){ console.log("[DEMO] saveInvoiceItems →",invoiceNo); return {status:"demo"}; }
+    try{ return await post({action:"saveInvoiceItems",invoiceNo,fy,items}); }
+    catch(e){
+      if (!isNetworkFailure(e)) return {error:e.message};
+      const localId = await offlineDB.enqueueWrite({action:"saveInvoiceItems",sheet:"Sales Invoice Items",invoiceNo,fy,items});
+      return {status:"queued",queued:true,localId,offline:true};
+    }
+  },
+  // Reads "Sales Invoice Items" via the existing generic read path (no new
+  // read endpoint) and filters client-side to this one invoice — mirrors
+  // how other modules filter FY-scoped data client-side after a generic
+  // read. Degrades to [] on any error (including an old deployment where
+  // the sheet doesn't exist yet — the backend already soft-fails that case,
+  // this is just the client-side half of the same "no items shown, never
+  // crash" contract), so callers can always render straight from the
+  // result without their own error branch.
+  async getInvoiceItems(invoiceNo){
+    if(IS_DEMO) return [];
+    const r = await sheetsAPI.read("Sales Invoice Items");
+    if (!r || r.error) return [];
+    return denormalizeRows("Sales Invoice Items",r)
+      .filter(i=>i.invoiceNo===invoiceNo && i.deleted!==true && i.deleted!=="TRUE")
+      .sort((a,b)=>(+a.srNo||0)-(+b.srNo||0));
+  },
   // Never falls back to a hardcoded "001" when offline — that's exactly what
   // risks two people, both offline, being handed the same document number.
   // Offline gets a clearly-fake DRAFT-<PREFIX>-<n> placeholder instead; the
@@ -323,6 +374,25 @@ export const sheetsAPI = {
   async setConfig(configKey,value,notes){
     if(IS_DEMO){ console.log("[DEMO] setConfig →",configKey,value); return {status:"demo"}; }
     try{ return await post({action:"setConfig",configKey,value,notes}); }
+    catch(e){ return {error:e.message}; }
+  },
+
+  // Count-only dry run for the Admin archiving screen — no writes. Never
+  // queued offline: archiving is an Admin-desk operation, not a field task
+  // that needs to survive a dropped connection.
+  async archivePreview(yearsToKeep){
+    if(IS_DEMO) return {status:"demo",results:[]};
+    try{ return await get(`${_API}?action=archivePreview&yearsToKeep=${encodeURIComponent(yearsToKeep)}`); }
+    catch(e){ return {error:e.message}; }
+  },
+  // The real, destructive-adjacent archiving run. Deliberately NOT queued on
+  // a network failure like append/update/softDelete — an archive run must
+  // either fully happen now (with its own audit-log row) or the Admin
+  // clearly sees it failed and can retry, never silently replay later from
+  // an offline queue against whatever the sheet looks like by then.
+  async archiveFY(yearsToKeep,runBy){
+    if(IS_DEMO){ console.log("[DEMO] archiveFY →",yearsToKeep); return {status:"demo",results:[]}; }
+    try{ return await post({action:"archiveFY",yearsToKeep,runBy}); }
     catch(e){ return {error:e.message}; }
   },
 
@@ -422,6 +492,16 @@ async function syncEntry(entry){
     await offlineDB.removeQueueItem(entry.localId);
     return "synced";
   }
+  if (entry.action==="saveInvoiceItems"){
+    // No conflict check here (unlike update/softDelete above) — this is a
+    // full soft-delete-then-append replace, not a positional edit, so
+    // there's no single "baseline row" to compare against. Runs the exact
+    // same backend action a live saveInvoiceItems call would.
+    const res = await post({action:"saveInvoiceItems",invoiceNo:entry.invoiceNo,fy:entry.fy,items:entry.items});
+    if (res?.error) throw new Error(res.error);
+    await offlineDB.removeQueueItem(entry.localId);
+    return "synced";
+  }
   return "synced"; // unknown action — shouldn't happen, nothing to do
 }
 
@@ -511,10 +591,47 @@ async function resolveConflict(localId,choice){
 // ─── ROW BUILDERS (column order matches Google Sheets schema exactly) ─────────
 const ts = () => new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"});
 export const buildJobRow      = (f,fy,u)   => [f.id,fy,ts(),u,f.client,f.turbine,f.oemMake,f.capacity,f.type,f.status,f.startDate,f.completionDate,f.poNo,f.poDate,+f.poValue||0,f.siteLocation,f.siteEngineer,f.assignedTo,+f.labourCharges||0,+f.materialCharges||0,+f.travelCharges||0,+f.otherCharges||0,+f.estimatedValue||0,f.scopeOfWork,f.specialTools,f.safetyRequirements,f.workPermitNo||"",f.lastOverhaulDate||"",f.rpm||"",f.lubOilType||"",+f.warrantyPeriod||0,f.invoiceStatus||"Pending",f.remarks||""];
-export const buildInvoiceRow  = (f,c,fy,u) => [f.invoiceNo,fy,ts(),u,f.date,f.client,f.jobRef||"",f.poNo||"",f.poDate||"",f.description,f.scopeDetails||"",+f.labourCharges||0,+f.materialCharges||0,+f.travelCharges||0,+f.otherCharges||0,c.sub,+f.discount||0,c.taxable,f.gstType,c.cgst,c.sgst,c.igst,c.gstAmt,f.tdsApplicable,+f.tdsRate||0,c.tdsAmt,c.grand,c.netPay,f.paymentTerms,f.dueDate||"",f.bankName||"",f.accountNo||"",f.ifsc||"","Unpaid",0,"",f.placeOfSupply||"",f.remarks||"",f.ewayBillNo||"",f.vehicleNo||""];
+// c.materialCharges is the resolved number calcInvoice() actually used
+// (items-derived total when f.items is populated, else the legacy typed
+// field) — using it here instead of re-reading +f.materialCharges keeps the
+// saved row consistent with whatever total was shown on screen.
+export const buildInvoiceRow  = (f,c,fy,u) => [f.invoiceNo,fy,ts(),u,f.date,f.client,f.jobRef||"",f.poNo||"",f.poDate||"",f.description,f.scopeDetails||"",+f.labourCharges||0,+(c.materialCharges??f.materialCharges)||0,+f.travelCharges||0,+f.otherCharges||0,c.sub,+f.discount||0,c.taxable,f.gstType,c.cgst,c.sgst,c.igst,c.gstAmt,f.tdsApplicable,+f.tdsRate||0,c.tdsAmt,c.grand,c.netPay,f.paymentTerms,f.dueDate||"",f.bankName||"",f.accountNo||"",f.ifsc||"","Unpaid",0,"",f.placeOfSupply||"",f.remarks||"",f.ewayBillNo||"",f.vehicleNo||""];
+// One row per Sales Invoice line item, column order matching the "Sales
+// Invoice Items" headers in apps-script-backend.js SCHEMA exactly. srNo is
+// the item's 1-based position within THIS save — it's a display/print
+// field only, never used to address the row (that's always Invoice No. +
+// the sheet's own row number).
+export const buildInvoiceItemRow = (item,invoiceNo,fy,srNo) => [invoiceNo,fy,srNo,item.description||"",item.hsn||"",+item.qty||0,item.unit||"",+item.rate||0,(+item.qty||0)*(+item.rate||0),ts(),false];
 export const buildPurchaseRow = (f,c,fy,u) => [f.ourRef||"",fy,ts(),u,f.date,f.vendorInvNo,f.vendorName,f.description,f.jobRef||"",f.poRef||"",f.category,+f.basicAmount||0,+f.discount||0,c.taxable,f.gstType,c.cgst,c.sgst,c.igst,c.gstTot,f.tdsApplicable,f.tdsSection||"194C",+f.tdsRate||0,c.tdsAmt,c.grand,c.netPay,f.itcEligible,f.paymentStatus,f.paymentMode,+f.amountPaid||0,f.paymentDate||"",f.utrRef||"",f.remarks||""];
 export const buildQuotationRow= (f,fy,u)   => [f.id,fy,ts(),u,f.client,f.subject,f.date,f.validTill||"",f.followUp||"",+f.value||0,+f.gstPct||18,Math.round((+f.value)*(+f.gstPct)/100),Math.round((+f.value)*(1+(+f.gstPct)/100)),+f.discountPct||0,f.paymentTerms,f.deliveryTerms,f.scopeNotes||"",f.preparedBy,f.revision,f.status,f.remarks||""];
 export const buildClientRow   = (f,fy,u)   => [f.code,fy,ts(),u,f.name,f.sector,f.contact,f.designation||"",f.mobile,f.altMobile||"",f.whatsapp||"",f.email||"",f.altEmail||"",f.address||"",f.city,f.state,f.pin||"",f.gstin||"",f.pan||"",+f.creditLimit||0,f.paymentTerms,+f.annualPotential||0,f.tdsApplicable,f.tdsRate||"",+f.noOfTurbines||0,f.oemInstalled||"",f.seasonalDependency||"",f.contact,f.influencer||"",f.source||"",f.status,f.nextFollowup||"","",0,f.remarks||""];
+// Column order matches "IndiaMART Leads" headers in apps-script-backend.js
+// SCHEMA exactly (see FIELD_MAPS comment in constants.js). Required fields
+// (dateReceived/companyName/contactPerson/mobile/productEnquired, plus the
+// select-backed status/priority/leadType which always carry a BLANK
+// default) go through unwrapped — same convention as buildClientRow above;
+// every genuinely optional field is wrapped `||""` / `+field||0` so a blank
+// stays a clean empty cell / zero instead of "undefined" / "NaN".
+// Win rate for the IndiaMART Leads KPI strip — pulled out as its own pure
+// function (like calcItemsTotal above) specifically so the "0 Won + 0 Lost"
+// edge case can be unit tested directly, instead of only being exercised
+// via a component render this codebase has no harness for. Returns "—" on
+// the divide-by-zero case, never "NaN%" or "Infinity%".
+export const calcWinRate = (won,lost) => (won+lost)===0 ? "—" : `${Math.round((won/(won+lost))*100)}%`;
+
+export const buildLeadRow = (f,fy,u) => [
+  f.leadId,fy,ts(),u,
+  f.dateReceived,f.queryId||"",
+  f.companyName,f.contactPerson,f.mobile,f.altMobile||"",
+  f.whatsappOpted||"No",f.email||"",
+  f.city||"",f.state||"",
+  f.productEnquired,f.requirementDetails||"",
+  f.leadType,+f.budget||0,f.priority,
+  f.status,f.quotationRef||"",+f.quotedValue||0,
+  f.firstContactedAt||"",+f.responseTimeHrs||0,
+  f.followUpDate||"",f.wonDate||"",f.lostReason||"",
+  f.competitorMentioned||"",f.assignedTo||"",f.remarks||"",
+];
 export const buildVendorRow   = (f,fy,u)   => [f.code,fy,ts(),u,f.name,f.category,f.contact,f.designation||"",f.mobile,f.altMobile||"",f.email||"",f.city||"",f.state||"",f.gstin||"",f.pan||"",f.bankName||"",f.accountNo||"",f.ifsc||"",f.accountType||"Current",f.paymentTerms,+f.creditLimitGiven||0,f.mseStatus,f.productList||"",+f.rating||3,f.status,"",0,f.remarks||""];
 export const buildInventoryRow= (f,fy,u)   => [f.code,fy,ts(),u,f.name,f.category,f.hsnCode||"",f.unit,+f.opening||0,0,0,+f.opening||0,+f.reorder||0,+f.moq||1,+f.leadTimeDays||0,+f.purchasePrice||0,+f.unitCost||0,Math.round((+f.opening||0)*(+f.unitCost||0)),f.supplier||"",f.altSupplier||"",f.rack||"",f.condition||"New",f.shelfLife||"",today(),f.remarks||""];
 export const buildExpenseRow  = (f,fy,u)   => [f.voucherNo||"",fy,ts(),u,f.date,f.category,f.subCategory||"",f.description,f.vendor||"",f.mode,(+f.amount||0),(+f.gst||0),f.gstType,(+f.amount||0)+(+f.gst||0),f.billNo||"",f.approvedBy,f.jobRef||"",f.remarks||""];

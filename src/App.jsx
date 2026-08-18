@@ -4,7 +4,7 @@ import { fmt, fmtD, isPast, daysFromToday, daysOverdue, stars, waLink, sheetsAPI
 import { mergeQueueIntoResult } from "./shared/offlineMerge.js";
 import { FYSelector, useToast, Alert, SyncStatusBadge, ConflictModal, SyncQueuePanel } from "./shared/ui.jsx";
 import { ErrorBoundary } from "./shared/ErrorBoundary.jsx";
-import { Dashboard, Jobs, Invoices, PurchaseInvoices, Quotations, Clients, Vendors, Inventory, Expenses, PettyCash, Ledger, ARaging, PandL, GSTSummary, TDSRegister, FixedAssets, FDTracker, Attendance, VehicleLog, DocumentVault, Settings } from "./modules/index.js";
+import { Dashboard, Jobs, Invoices, PurchaseInvoices, Quotations, IndiamartLeads, Clients, Vendors, Inventory, Expenses, PettyCash, Ledger, ARaging, PandL, GSTSummary, TDSRegister, FixedAssets, FDTracker, Attendance, VehicleLog, DocumentVault, Settings, Archiving } from "./modules/index.js";
 
 // ─── Contexts ─────────────────────────────────────────────────────────────────
 export const AuthCtx = createContext(null);
@@ -50,6 +50,14 @@ const MOCK = {
     { id:"KE/QT/2026-27/002", fy:"2026-27", client:"IOCL Mathura Refinery",    subject:"Lube oil flushing + shaft alignment",    date:"2026-05-15", validTill:"2026-06-15", followUp:"2026-07-10", value:450000,  gstPct:18, discountPct:0, paymentTerms:"60 days",  deliveryTerms:"At site", scopeNotes:"LO flushing + alignment", preparedBy:"Keshav Sharma", revision:"R1", status:"Pending",  remarks:"" },
     { id:"KE/QT/2026-27/003", fy:"2026-27", client:"Balrampur Chini Mills",    subject:"Pre-crushing season turbine inspection", date:"2026-06-10", validTill:"2026-07-10", followUp:"2026-07-25", value:280000,  gstPct:18, discountPct:0, paymentTerms:"30 days",  deliveryTerms:"At site", scopeNotes:"Pre-season inspection + alignment", preparedBy:"Keshav Sharma", revision:"R0", status:"Sent",     remarks:"" },
     { id:"KE/QT/2026-27/004", fy:"2026-27", client:"Mawana Sugars Ltd",        subject:"Bearing replacement + dynamic balancing", date:"2026-06-01", validTill:"2026-07-01", followUp:"2026-07-20", value:185000,  gstPct:18, discountPct:5, paymentTerms:"30 days",  deliveryTerms:"At site", scopeNotes:"Bearing + balancing + certificate", preparedBy:"Keshav Sharma", revision:"R0", status:"Negotiating",remarks:"" },
+  ],
+  indiamart: [
+    { leadId:"KE/IM/2026-27/001", fy:"2026-27", dateReceived:"2026-06-02", queryId:"IM-QID-88213", companyName:"Rohilkhand Sugar Works", contactPerson:"Mr. Anil Chaudhary", mobile:"9891234567", altMobile:"", whatsappOpted:"Yes", email:"anil@rohilkhandsugar.in", city:"Bareilly", state:"Uttar Pradesh", productEnquired:"Turbine overhaul service", requirementDetails:"3.5MW back-pressure turbine, annual overhaul before crushing season", leadType:"Buy Lead", budget:600000, priority:"High", status:"Quoted", quotationRef:"KE/QT/2026-27/005", quotedValue:580000, firstContactedAt:"3/6/2026, 10:15:00 am", responseTimeHrs:24.3, followUpDate:"2026-08-25", wonDate:"", lostReason:"", competitorMentioned:"", assignedTo:"Keshav Sharma", remarks:"Decision expected before Oct" },
+    { leadId:"KE/IM/2026-27/002", fy:"2026-27", dateReceived:"2026-06-18", queryId:"IM-QID-88940", companyName:"Ganga Paper Mills",       contactPerson:"Ms. Priya Sharma",   mobile:"9902345678", altMobile:"", whatsappOpted:"Yes", email:"priya@gangapaper.com",   city:"Saharanpur", state:"Uttar Pradesh", productEnquired:"Dynamic balancing service",   requirementDetails:"1.2MW turbine showing vibration, need urgent balancing", leadType:"Buy Lead", budget:120000, priority:"High",   status:"Won",       quotationRef:"KE/QT/2026-27/006", quotedValue:110000, firstContactedAt:"18/6/2026, 3:40:00 pm", responseTimeHrs:2.1,  followUpDate:"",           wonDate:"2026-07-05", lostReason:"", competitorMentioned:"", assignedTo:"Keshav Sharma", remarks:"Converted to Job KE-JOB-2026-050" },
+    { leadId:"KE/IM/2026-27/003", fy:"2026-27", dateReceived:"2026-07-01", queryId:"IM-QID-89502", companyName:"Vindhya Petrochem Ltd",  contactPerson:"Mr. Sanjay Rathi",   mobile:"9913456789", altMobile:"", whatsappOpted:"No",  email:"",                        city:"Mathura",    state:"Uttar Pradesh", productEnquired:"Reverse engineering — coupling",requirementDetails:"OEM discontinued, need replacement drawing + part",       leadType:"Buy Lead", budget:0,      priority:"Medium", status:"Follow-up", quotationRef:"",                   quotedValue:0,      firstContactedAt:"1/7/2026, 11:00:00 am", responseTimeHrs:5.0,  followUpDate:"2026-08-20", wonDate:"",           lostReason:"", competitorMentioned:"", assignedTo:"Keshav Sharma", remarks:"Waiting on drawing from client" },
+    { leadId:"KE/IM/2026-27/004", fy:"2026-27", dateReceived:"2026-07-10", queryId:"IM-QID-90118", companyName:"Elite Cement Works",     contactPerson:"Mr. Deepak Yadav",   mobile:"9924567890", altMobile:"", whatsappOpted:"Yes", email:"deepak@elitecement.in",  city:"Jhansi",     state:"Uttar Pradesh", productEnquired:"AMC — turbine maintenance",     requirementDetails:"Annual maintenance contract, 2 turbines",                leadType:"Buy Lead", budget:400000, priority:"Medium", status:"Lost",      quotationRef:"KE/QT/2026-27/007", quotedValue:380000, firstContactedAt:"10/7/2026, 9:30:00 am", responseTimeHrs:1.5,  followUpDate:"",           wonDate:"",           lostReason:"Went with local competitor on price", competitorMentioned:"Local vendor, ~15% lower quote", assignedTo:"Keshav Sharma", remarks:"" },
+    { leadId:"KE/IM/2026-27/005", fy:"2026-27", dateReceived:"2026-08-05", queryId:"IM-QID-91004", companyName:"Himalaya Distillery",    contactPerson:"Mr. Vikram Sengar",  mobile:"9935678901", altMobile:"", whatsappOpted:"Yes", email:"vikram@himalayadist.com",city:"Roorkee",    state:"Uttarakhand",  productEnquired:"Turbine erection & commissioning",requirementDetails:"New 800kW turbine being installed, need E&C support",   leadType:"Buy Lead", budget:0,      priority:"High",   status:"Contacted", quotationRef:"",                   quotedValue:0,      firstContactedAt:"6/8/2026, 4:20:00 pm",  responseTimeHrs:28.7, followUpDate:"2026-08-22", wonDate:"",           lostReason:"", competitorMentioned:"", assignedTo:"Keshav Sharma", remarks:"Site visit planned" },
+    { leadId:"KE/IM/2026-27/006", fy:"2026-27", dateReceived:"2026-08-14", queryId:"IM-QID-91560", companyName:"Northern Oil Refinery",  contactPerson:"Mr. Ashok Bansal",   mobile:"9946789012", altMobile:"", whatsappOpted:"No",  email:"a.bansal@nor.co.in",     city:"Mathura",    state:"Uttar Pradesh", productEnquired:"Emergency vibration troubleshooting", requirementDetails:"Sudden vibration spike on 210MW unit", leadType:"Direct Call", budget:0, priority:"High", status:"New", quotationRef:"", quotedValue:0, firstContactedAt:"", responseTimeHrs:"", followUpDate:"2026-08-19", wonDate:"", lostReason:"", competitorMentioned:"", assignedTo:"Keshav Sharma", remarks:"Called directly, not yet in IndiaMART portal follow-up" },
   ],
   vendors: [
     { code:"KE-VN-001", fy:"2026-27", name:"SKF India Pvt Ltd",     category:"Bearings",         contact:"Mr. Rajesh Kumar", designation:"Area Sales Manager", mobile:"9812340001", altMobile:"", email:"rajesh.k@skf.com",   city:"Delhi",     state:"Delhi",       gstin:"07AABCS1234A1Z5", pan:"AABCS1234A", bankName:"HDFC Bank", accountNo:"XXXX1234", ifsc:"HDFC0001234", accountType:"Current", paymentTerms:"30 days", creditLimitGiven:200000, mseStatus:"No",  productList:"Bearings, seals, lubrication", rating:5, status:"Active", remarks:"Authorized SKF" },
@@ -208,7 +216,7 @@ function Login({ onLogin, passcodeMap, configLoading }) {
 // Maps the MOCK/module data key to the actual Google Sheet tab name.
 const SHEET_FOR = {
   jobs:"Jobs", invoices:"Sales Invoices", purchases:"Purchase Invoices",
-  quotations:"Quotations", clients:"Clients", vendors:"Vendors",
+  quotations:"Quotations", indiamart:"IndiaMART Leads", clients:"Clients", vendors:"Vendors",
   inventory:"Inventory", expenses:"Expenses", pettyCash:"Petty Cash",
   ledger:"Ledger", fds:"FD Tracker", vault:"Document Vault",
   tds:"TDS", attendance:"Attendance", vehicles:"Vehicles",
@@ -230,6 +238,7 @@ const SEARCH_CONFIG = [
   { key:"invoices",   moduleId:"invoices",   fields:["invoiceNo","client","description","poNo"] },
   { key:"purchases",  moduleId:"purchases",  fields:["id","vendorName","vendorInvNo","description"] },
   { key:"quotations", moduleId:"quotations", fields:["id","client","subject"] },
+  { key:"indiamart",  moduleId:"indiamart",  fields:["leadId","companyName","contactPerson","productEnquired","queryId"] },
   { key:"clients",    moduleId:"clients",    fields:["name","code","contact","city","mobile"] },
   { key:"vendors",    moduleId:"vendors",    fields:["name","code","contact","city"] },
   { key:"ledger",     moduleId:"ledger",     fields:["voucherNo","party","narration"] },
@@ -243,6 +252,7 @@ const searchResultLabel = (moduleId, row) => {
     case "invoices":   return `${row.invoiceNo} — ${row.client}`;
     case "purchases":  return `${row.id} — ${row.vendorName}`;
     case "quotations": return `${row.id} — ${row.client}`;
+    case "indiamart":  return `${row.companyName}${row.leadId?` (${row.leadId})`:""}`;
     case "clients":    return `${row.name}${row.code?` (${row.code})`:""}`;
     case "vendors":    return row.name;
     case "ledger":     return `${row.voucherNo} — ${row.party}`;
@@ -386,6 +396,7 @@ export default function App() {
 // twice because Apps Script can't import the React source.
 const MODULE_TO_SHEETKEYS = {
   jobs:["jobs"], invoices:["invoices"], purchases:["purchases"], quotations:["quotations"],
+  indiamart:["indiamart"],
   clients:["clients"], vendors:["vendors"], inventory:["inventory"], expenses:["expenses"],
   pettycash:["pettyCash"], ledger:["ledger"], fd:["fds"], vault:["vault"], tds:["tds"],
   attendance:["attendance"], vehicles:["vehicles"],
@@ -603,6 +614,7 @@ const fyCacheRef = useRef(new Map());
     invoices:   <Invoices   {...commonProps} data={D("invoices")}  clients={D("clients")} jobs={D("jobs")}/>,
     purchases:  <PurchaseInvoices {...commonProps} data={D("purchases")} vendors={D("vendors")} jobs={D("jobs")}/>,
     quotations: <Quotations {...commonProps} data={D("quotations")} clients={D("clients")}/>,
+    indiamart:  <IndiamartLeads {...commonProps} data={D("indiamart")}/>,
     clients:    <Clients    {...commonProps} data={D("clients")}/>,
     vendors:    <Vendors    {...commonProps} data={D("vendors")}/>,
     inventory:  <Inventory  {...commonProps} data={D("inventory")} vendors={D("vendors")}/>,
@@ -619,6 +631,7 @@ const fyCacheRef = useRef(new Map());
     attendance: <Attendance {...commonProps} data={D("attendance")}/>,
     vehicles:   <VehicleLog {...commonProps} data={D("vehicles")}/>,
     settings:   <Settings   user={user} configData={configData} onConfigUpdated={loadConfig}/>,
+    archiving:  <Archiving  user={user}/>,
   };
 
   return (

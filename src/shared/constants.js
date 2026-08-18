@@ -32,17 +32,17 @@ export const ROLES = {
     label: "Admin (Keshav)",
     color: T.gold,
     modules: [
-      "dashboard","jobs","invoices","purchases","quotations",
+      "dashboard","jobs","invoices","purchases","quotations","indiamart",
       "clients","vendors","inventory","expenses","pettycash",
       "ledger","ar","pl","gst","tds","assets","fd",
-      "vault","attendance","vehicles","settings",
+      "vault","attendance","vehicles","settings","archiving",
     ],
   },
   staff: {
     label: "Staff",
     color: T.green,
     modules: [
-      "dashboard","jobs","invoices","quotations",
+      "dashboard","jobs","invoices","quotations","indiamart",
       "clients","vendors","inventory","expenses","pettycash",
     ],
   },
@@ -61,6 +61,7 @@ export const ALL_MODULES = [
   { id:"invoices",    icon:"📄", label:"Sales Invoices",      group:"Operations" },
   { id:"purchases",   icon:"🛒", label:"Purchase Invoices",   group:"Operations" },
   { id:"quotations",  icon:"📋", label:"Quotations",          group:"Operations" },
+  { id:"indiamart",   icon:"🔎", label:"IndiaMART Leads",     group:"Operations" },
   { id:"clients",     icon:"👥", label:"Clients",             group:"Operations" },
   { id:"vendors",     icon:"🏭", label:"Vendors",             group:"Operations" },
   { id:"inventory",   icon:"📦", label:"Inventory",           group:"Operations" },
@@ -80,6 +81,7 @@ export const ALL_MODULES = [
   { id:"attendance",  icon:"👷", label:"Attendance & Labour", group:"Admin" },
   { id:"vehicles",    icon:"🚗", label:"Vehicle Log",         group:"Admin" },
   { id:"settings",    icon:"⚙️", label:"Settings",            group:"Admin" },
+  { id:"archiving",   icon:"🗄️", label:"FY Archiving",        group:"Admin" },
 ];
 
 export const MODULE_GROUPS = ["Main","Operations","Finance","Assets","Admin"];
@@ -153,6 +155,9 @@ export const OPT = {
   docCats:   ["Registration","Insurance","AMC / Contracts","Client Documents","Tax & GST","Legal","Certificates","Bank Documents","Permits","Other"],
   designations:["Maintenance Head","Plant Head","Chief Engineer","Reliability Engineer","Turbine Engineer","DGM Maintenance","MD / Owner","Purchase Manager","Project Manager","GM Technical","Electrical Engineer"],
   banks:     ["State Bank of India","HDFC Bank","ICICI Bank","Punjab National Bank","Axis Bank","Bank of Baroda","Canara Bank","Union Bank","Yes Bank"],
+  leadTypes:  ["Buy Lead","Free Lead","Catalog View","Direct Call"],
+  leadStatus: ["New","Contacted","Quoted","Follow-up","Won","Lost","Not Interested"],
+  priorities: ["High","Medium","Low"],
 };
 
 // ─── SHEET ↔ FRONTEND FIELD MAPS ───────────────────────────────────────────────
@@ -167,8 +172,15 @@ export const OPT = {
 export const FIELD_MAPS = {
   Jobs: ["id","fy","createdAt","createdBy","client","turbine","oemMake","capacity","type","status","startDate","completionDate","poNo","poDate","poValue","siteLocation","siteEngineer","assignedTo","labourCharges","materialCharges","travelCharges","otherCharges","estimatedValue","scopeOfWork","specialTools","safetyRequirements","workPermitNo","lastOverhaulDate","rpm","lubOilType","warrantyPeriod","invoiceStatus","remarks"],
   "Sales Invoices": ["invoiceNo","fy","createdAt","createdBy","date","client","jobRef","poNo","poDate","description","scopeDetails","labourCharges","materialCharges","travelCharges","otherCharges","subtotal","discount","taxableAmount","gstType","cgst","sgst","igst","totalGST","tdsApplicable","tdsRate","tdsAmt","grandTotal","netPayable","paymentTerms","dueDate","bankName","accountNo","ifsc","status","amountReceived","lastPaymentDate","placeOfSupply","remarks","ewayBillNo","vehicleNo"],
+  // Added 2026-08-18 — line items for multi-item Sales Invoices (separate
+  // sheet, linked by invoiceNo string — see apps-script-backend.js SCHEMA
+  // comment). Order matches "Sales Invoice Items" headers there exactly.
+  "Sales Invoice Items": ["invoiceNo","fy","srNo","description","hsn","qty","unit","rate","amount","createdAt","deleted"],
   "Purchase Invoices": ["id","fy","createdAt","createdBy","date","vendorInvNo","vendorName","description","jobRef","poRef","category","basicAmount","discount","taxableAmount","gstType","cgst","sgst","igst","totalGST","tdsApplicable","tdsSection","tdsRate","tdsDeducted","totalAmount","netPayable","itcEligible","paymentStatus","paymentMode","amountPaid","paymentDate","utrRef","remarks"],
   Quotations: ["id","fy","createdAt","createdBy","client","subject","date","validTill","followUp","value","gstPct","gstAmt","total","discountPct","paymentTerms","deliveryTerms","scopeNotes","preparedBy","revision","status","remarks"],
+  // Order matches "IndiaMART Leads" headers in apps-script-backend.js SCHEMA
+  // exactly — 30 headers in, 30 fields out (cross-checked 2026-08-18).
+  "IndiaMART Leads": ["leadId","fy","createdAt","createdBy","dateReceived","queryId","companyName","contactPerson","mobile","altMobile","whatsappOpted","email","city","state","productEnquired","requirementDetails","leadType","budget","priority","status","quotationRef","quotedValue","firstContactedAt","responseTimeHrs","followUpDate","wonDate","lostReason","competitorMentioned","assignedTo","remarks"],
   Clients: ["code","fy","createdAt","createdBy","name","sector","contact","designation","mobile","altMobile","whatsapp","email","altEmail","address","city","state","pin","gstin","pan","creditLimit","paymentTerms","annualPotential","tdsApplicable","tdsRate","noOfTurbines","oemInstalled","seasonalDependency","decisionMaker","influencer","source","status","nextFollowup","lastVisited","outstanding","remarks"],
   Vendors: ["code","fy","createdAt","createdBy","name","category","contact","designation","mobile","altMobile","email","city","state","gstin","pan","bankName","accountNo","ifsc","accountType","paymentTerms","creditLimitGiven","mseStatus","productList","rating","status","lastOrderDate","totalBusiness","remarks"],
   Inventory: ["code","fy","createdAt","createdBy","name","category","hsnCode","unit","opening","purchased","issued","closing","reorder","moq","leadTimeDays","purchasePrice","unitCost","stockValue","supplier","altSupplier","rack","condition","shelfLife","lastCountDate","remarks"],

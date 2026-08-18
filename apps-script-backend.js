@@ -81,6 +81,26 @@ const SCHEMA = {
     freeze: 1, color: "#1A7A4A",
   },
 
+  // Added 2026-08-18 — line items for multi-item Sales Invoices. Kept as a
+  // SEPARATE sheet (not new columns on "Sales Invoices") so existing saved
+  // invoices with zero item rows keep working unmodified, and so a single
+  // invoice can have any number of line items without touching the
+  // fixed-width "Sales Invoices" row shape at all. Rows are linked to their
+  // invoice by the "Invoice No." string — NEVER by row position — matching
+  // every other cross-sheet reference in this backend. "Deleted" is a
+  // soft-delete flag (not a hard row delete), same audit-trail reasoning as
+  // the rest of this app: an edit that removes a line item must not lose
+  // the history of what the invoice used to say.
+  "Sales Invoice Items": {
+    headers: [
+      "Invoice No.", "FY", "SR No.",
+      "Item Description", "HSN/SAC Code",
+      "Quantity", "Unit", "Rate (Rs)", "Amount (Rs)",
+      "Created At", "Deleted",
+    ],
+    freeze: 1, color: "#1A7A4A",
+  },
+
   "Purchase Invoices": {
     headers: [
       "Our Reference","FY","Created At","Created By",
@@ -105,6 +125,28 @@ const SCHEMA = {
       "Scope Notes","Prepared By","Revision","Status","Remarks",
     ],
     freeze: 1, color: "#C8961E",
+  },
+
+  // Standalone lead register fed by the IndiaMART portal. Deliberately NOT
+  // linked to "Clients" — an enquiry here is a raw, unqualified lead, and a
+  // lead-to-client conversion step (if ever wanted) is a separate future
+  // decision, not something this sheet should assume by cross-referencing
+  // Client records today.
+  "IndiaMART Leads": {
+    headers: [
+      "Lead ID", "FY", "Created At", "Created By",
+      "Date Received", "IndiaMART Query ID",
+      "Company Name", "Contact Person", "Mobile", "Alt Mobile",
+      "WhatsApp Opted", "Email",
+      "City", "State",
+      "Product/Service Enquired", "Requirement Details",
+      "Lead Type", "Budget Indicated (Rs)", "Priority",
+      "Status", "Quotation Ref", "Quoted Value (Rs)",
+      "First Contacted At", "Response Time (Hrs)",
+      "Follow-up Date", "Won Date", "Lost Reason",
+      "Competitor Mentioned", "Assigned To", "Remarks",
+    ],
+    freeze: 1, color: "#D85A30",
   },
 
   Clients: {
@@ -245,6 +287,14 @@ const SCHEMA = {
     freeze: 1, color: "#64748B",
   },
 
+  // Audit trail for FY archiving runs — see "FY ARCHIVING" section below.
+  // One row per SHEET per run (not one row per run), so "how many Sales
+  // Invoices did the Aug run archive" is a direct read, not a re-derivation.
+  "Archive Log": {
+    headers: ["Run At","Run By","Years Kept","Sheet","Archived","Kept","Skipped Open"],
+    freeze: 1, color: "#64748B",
+  },
+
 };
 
 // ─── UTILITIES ─────────────────────────────────────────────────────────────────
@@ -294,15 +344,21 @@ function timestamp() {
 // underlying sheets here too, sheetAllowedForRole() would block CA from
 // reading the very sheets its own reports are computed from.
 const MODULE_SHEETS = {
-  jobs:["Jobs"], invoices:["Sales Invoices"], purchases:["Purchase Invoices"], quotations:["Quotations"],
+  jobs:["Jobs"], invoices:["Sales Invoices","Sales Invoice Items"], purchases:["Purchase Invoices"], quotations:["Quotations"],
+  indiamart:["IndiaMART Leads"],
   clients:["Clients"], vendors:["Vendors"], inventory:["Inventory"], expenses:["Expenses"],
   pettycash:["Petty Cash"], ledger:["Ledger"], tds:["TDS"], assets:["Fixed Assets"], fd:["FD Tracker"],
   vault:["Document Vault"], attendance:["Attendance"], vehicles:["Vehicles"],
-  ar:["Sales Invoices"], pl:["Sales Invoices","Purchase Invoices","Expenses"], gst:["Sales Invoices","Purchase Invoices"],
+  // "Sales Invoice Items" added alongside "Sales Invoices" here too — CA
+  // can already read "Sales Invoices" through these computed modules (AR/
+  // P&L/GST are all derived from it), so the line-item detail behind an
+  // invoice should be readable the same way, not gated behind the
+  // "invoices" module CA doesn't have.
+  ar:["Sales Invoices","Sales Invoice Items"], pl:["Sales Invoices","Sales Invoice Items","Purchase Invoices","Expenses"], gst:["Sales Invoices","Sales Invoice Items","Purchase Invoices"],
 };
 const ROLE_MODULES = {
   admin: ["*"],
-  staff: ["dashboard","jobs","invoices","quotations","clients","vendors","inventory","expenses","pettycash"],
+  staff: ["dashboard","jobs","invoices","quotations","indiamart","clients","vendors","inventory","expenses","pettycash"],
   ca:    ["dashboard","purchases","ledger","ar","pl","gst","tds","assets"],
 };
 // CA is explicitly read-only per its label in Settings — never allowed to append/update/delete/setConfig.
@@ -473,6 +529,271 @@ function inFY(dateStr, fy) {
   return d >= new Date(sy,3,1) && d <= new Date(sy+1,2,31,23,59,59);
 }
 
+// ─── FY ARCHIVING ───────────────────────────────────────────────────────────────
+// Moves old-FY rows out of the live/working sheet into a twin "<Sheet> Archive"
+// tab (same headers, created on first use — see getOrCreateArchiveSheet), so
+// the live sheets stay fast and uncluttered while nothing is ever deleted.
+//
+// Sheets NOT listed here archive by row position anyway — they're simply
+// never touched, because their "FY"/"FY Added" column means "year the
+// record was ADDED," not "scope the record stops belonging to": Clients,
+// Vendors, Fixed Assets, FD Tracker, Document Vault, Config. An old client
+// is still a client; archiving by that FY would hide active records.
+//
+// "Sales Invoice Items", "IndiaMART Leads", and "Inventory" are deliberately
+// left OUT too, pending explicit review — they didn't exist (Sales Invoice
+// Items) or weren't analyzed when this list was scoped, and Sales Invoice
+// Items specifically can't just be archived independently of its parent
+// invoice (see the cascade in archiveSheetFYs below) or it ends up either
+// orphaned (items pointing at an archived invoice) or silently untouched
+// forever (never itself old enough to independently qualify, since its own
+// "FY" is stamped from the invoice, not re-evaluated).
+const ARCHIVABLE_SHEETS = [
+  "Expenses", "Petty Cash", "Attendance", "Vehicles",              // pure date-gated — every row is a closed, one-time event
+  "Sales Invoices", "Purchase Invoices", "Jobs", "Quotations", "TDS", // status-gated — see ARCHIVE_STATUS_GUARD
+  "Ledger",                                                          // date-gated — see decision note below
+];
+
+// Ledger decision: checked against the LIVE app on 2026-08-18, not assumed.
+// Ledger.jsx computes its running balance ONLY from rows in the currently
+// selected FY (`data.filter(r => r.fy===fy)`, `runBal` starts at 0 every
+// render) — it never carries an opening balance forward from a prior FY.
+// No other report (AR Aging, P&L, GST Summary, Clients' "Outstanding (Rs)"
+// field) reads Ledger across FY boundaries either; AR Aging computes
+// straight off Sales Invoices (grandTotal - received), and "Outstanding" is
+// a manually-maintained Clients field, not derived from Ledger at all. So
+// archiving old-FY Ledger rows today cannot corrupt any balance currently
+// shown anywhere — there is no cross-FY running total to break.
+// IF THIS EVER CHANGES — a genuine cross-FY running/opening-balance report
+// gets added — THIS DECISION MUST BE REVISITED before Ledger archiving runs
+// again: remove "Ledger" from ARCHIVABLE_SHEETS above until an opening-
+// balance snapshot mechanism exists for it.
+
+// Sheets listed here need BOTH an old FY AND a closed status — being old
+// alone isn't enough, the record can still be genuinely unresolved (an old
+// unpaid Sales Invoice is real outstanding receivable money; archiving it
+// would hide it from AR Aging). Sheets NOT listed in this map (Expenses,
+// Petty Cash, Attendance, Vehicles, Ledger) archive by FY alone — every row
+// there is already a closed, one-time event with no open/closed distinction.
+//
+// closedValues are taken from the REAL status options each module's form
+// actually offers (src/modules/*.jsx / src/shared/constants.js), not
+// invented — e.g. Quotations offers Draft/Sent/Pending/Negotiating/
+// Accepted/Rejected, never "Won/Lost/Expired", so closedValues reflects
+// that.
+const ARCHIVE_STATUS_GUARD = {
+  "Sales Invoices":    { col: "Payment Status", closedValues: ["Paid"] },
+  "Purchase Invoices": { col: "Payment Status", closedValues: ["Paid"] },
+  "Jobs":              { col: "Invoice Status", closedValues: ["Paid"] },
+  "Quotations":        { col: "Status",         closedValues: ["Accepted","Rejected"] },
+  "TDS":               { col: "Status",         closedValues: ["Deposited","Filed"] },
+};
+
+// Which FY strings stay in the live sheet. yearsToKeep=2 keeps the current
+// FY plus the 1 FY before it (2 FYs total live); anything older is
+// candidate for archiving (still subject to the status guard above).
+function currentAndRecentFYs(yearsToKeep) {
+  const cur = detectFY();
+  const [startYear] = cur.split("-").map(Number);
+  const keep = new Set();
+  const n = Math.max(1, +yearsToKeep || 2);
+  for (let i = 0; i < n; i++) {
+    const y = startYear - i;
+    keep.add(`${y}-${String(y+1).slice(2)}`);
+  }
+  return keep;
+}
+
+// Single source of truth for "does this row get archived" — used by BOTH
+// archiveSheetFYs (the real write path) and archivePreview (count-only), so
+// the two can never drift out of sync. row/headers are one raw sheet row
+// and its header array (same shape SpreadsheetApp.getValues() returns).
+function isRowArchiveEligible(sheetName, row, headers, keepFYs) {
+  const fyCol = headers.indexOf("FY");
+  if (fyCol === -1) return false; // no FY column — nothing to archive by
+  const inKeepWindow = keepFYs.has(String(row[fyCol]));
+  if (inKeepWindow) return false;
+  const guard = ARCHIVE_STATUS_GUARD[sheetName];
+  if (!guard) return true; // pure date-gated sheet — old FY alone is enough
+  const statusCol = headers.indexOf(guard.col);
+  if (statusCol === -1) {
+    // Column missing (renamed header, old deployment not yet upgraded) —
+    // don't silently block archiving on a config error, but this is a real
+    // problem worth someone's attention, not a normal path.
+    Logger.log(`Archive guard misconfigured: "${sheetName}" has no "${guard.col}" column — treating all its old-FY rows as eligible. Check ARCHIVE_STATUS_GUARD against the live headers.`);
+    return true;
+  }
+  return guard.closedValues.includes(row[statusCol]);
+}
+
+// Gets (or lazily creates) the "<sheetName> Archive" twin tab that archived
+// rows are copied into. Not pre-declared in SCHEMA/initAllSheets — created
+// on first actual use, with whichever headers the LIVE sheet has at that
+// moment, so it never drifts from a schema change made after this file was
+// last deployed.
+function getOrCreateArchiveSheet(sheetName, headers, ss) {
+  const spreadsheet = ss || SpreadsheetApp.openById(CONFIG.SHEET_ID);
+  const archiveName = `${sheetName} Archive`;
+  let ws = spreadsheet.getSheetByName(archiveName);
+  if (!ws) {
+    ws = spreadsheet.insertSheet(archiveName);
+    ws.getRange(1, 1, 1, headers.length).setValues([headers]);
+    ws.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#555555").setFontColor("#FFFFFF");
+    ws.setFrozenRows(1);
+    try { ws.setTabColor("#888888"); } catch (e) {} // cosmetic only, never fail the archive over it
+  }
+  return ws;
+}
+
+// Cascade for archiving "Sales Invoices": its line items in "Sales Invoice
+// Items" are linked by the "Invoice No." string, never by row position (see
+// that sheet's own SCHEMA comment) — so when an invoice is archived, its
+// items must move with it, or they're left behind pointing at an invoice
+// that no longer exists on the live tab. Mirrors the existing delete cascade
+// (softDeleteInvoiceItems) but MOVES rows instead of soft-deleting them.
+// No-ops safely if "Sales Invoice Items" doesn't exist yet (old deployment).
+function archiveInvoiceItemsFor(invoiceNoSet, ss) {
+  if (!invoiceNoSet || !invoiceNoSet.size) return 0;
+  let ws;
+  try { ws = getSheet("Sales Invoice Items", ss); }
+  catch (e) { return 0; }
+  const values = ws.getDataRange().getValues();
+  if (values.length <= 1) return 0;
+  const headers  = values[0];
+  const invNoCol = headers.indexOf("Invoice No.");
+  if (invNoCol === -1) return 0;
+  const dataRows = values.slice(1);
+  const archiveRows = [], keepRows = [];
+  dataRows.forEach(row => (invoiceNoSet.has(row[invNoCol]) ? archiveRows : keepRows).push(row));
+  if (!archiveRows.length) return 0;
+
+  const archiveWs = getOrCreateArchiveSheet("Sales Invoice Items", headers, ss);
+  const startRow  = archiveWs.getLastRow() + 1;
+  archiveWs.getRange(startRow, 1, archiveRows.length, headers.length).setValues(archiveRows);
+  const verify = archiveWs.getRange(startRow, 1, archiveRows.length, headers.length).getValues();
+  if (verify.length !== archiveRows.length) {
+    throw new Error(`Archive verify failed for "Sales Invoice Items" cascade: wrote ${archiveRows.length} rows, read back ${verify.length}. Live "Sales Invoice Items" was NOT modified.`);
+  }
+  ws.getRange(2, 1, dataRows.length, headers.length).clearContent();
+  if (keepRows.length) ws.getRange(2, 1, keepRows.length, headers.length).setValues(keepRows);
+  return archiveRows.length;
+}
+
+// The real write path for one sheet: split rows into archive/keep using
+// isRowArchiveEligible, COPY the archive-bound rows to the "<Sheet> Archive"
+// tab, VERIFY the copy landed (read back the exact range just written and
+// compare row counts), and ONLY THEN clear and rewrite the live sheet with
+// just the kept rows. If verification fails, the live sheet is left
+// completely untouched — the function throws before ever calling
+// clearContent(). Wrapped end-to-end in a script lock: this rewrites a
+// whole sheet's row layout, and a write landing mid-archive (append/update
+// against a rowIndex that's about to shift) would corrupt data far worse
+// than the usual per-row race this app's other locks guard against.
+function archiveSheetFYs(sheetName, yearsToKeep, ss) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const spreadsheet = ss || SpreadsheetApp.openById(CONFIG.SHEET_ID);
+    const ws     = getSheet(sheetName, spreadsheet);
+    const values = ws.getDataRange().getValues();
+    if (values.length <= 1) return { sheet: sheetName, totalRows: 0, archived: 0, kept: 0, skippedOpen: 0 };
+
+    const headers  = values[0];
+    const dataRows = values.slice(1);
+    const keepFYs  = currentAndRecentFYs(yearsToKeep);
+    const fyCol    = headers.indexOf("FY");
+
+    const archiveRows = [], keepRows = [];
+    let skippedOpen = 0;
+    dataRows.forEach(row => {
+      if (isRowArchiveEligible(sheetName, row, headers, keepFYs)) {
+        archiveRows.push(row);
+        return;
+      }
+      keepRows.push(row);
+      // "skipped open" = old FY, kept specifically because it wasn't closed
+      // yet — NOT because it's in the keep window. Worth surfacing on its
+      // own: a lot of old unpaid invoices piling up is a business signal.
+      const inKeepWindow = fyCol > -1 && keepFYs.has(String(row[fyCol]));
+      if (!inKeepWindow) skippedOpen++;
+    });
+
+    if (!archiveRows.length) {
+      return { sheet: sheetName, totalRows: dataRows.length, archived: 0, kept: keepRows.length, skippedOpen };
+    }
+
+    let cascadedItems = 0;
+    if (sheetName === "Sales Invoices") {
+      const invNoCol = headers.indexOf("Invoice No.");
+      const archivedInvoiceNos = new Set(archiveRows.map(r => r[invNoCol]));
+      cascadedItems = archiveInvoiceItemsFor(archivedInvoiceNos, spreadsheet);
+    }
+
+    // 1. COPY to the archive tab first.
+    const archiveWs = getOrCreateArchiveSheet(sheetName, headers, spreadsheet);
+    const startRow  = archiveWs.getLastRow() + 1;
+    archiveWs.getRange(startRow, 1, archiveRows.length, headers.length).setValues(archiveRows);
+
+    // 2. VERIFY the copy landed BEFORE touching the live sheet.
+    const verifyValues = archiveWs.getRange(startRow, 1, archiveRows.length, headers.length).getValues();
+    if (verifyValues.length !== archiveRows.length) {
+      throw new Error(`Archive verify failed for "${sheetName}": wrote ${archiveRows.length} rows, read back ${verifyValues.length}. Live sheet was NOT modified.`);
+    }
+
+    // 3. ONLY NOW clear and rewrite the live sheet with just the kept rows.
+    ws.getRange(2, 1, dataRows.length, headers.length).clearContent();
+    if (keepRows.length) ws.getRange(2, 1, keepRows.length, headers.length).setValues(keepRows);
+
+    const result = { sheet: sheetName, totalRows: dataRows.length, archived: archiveRows.length, kept: keepRows.length, skippedOpen };
+    if (sheetName === "Sales Invoices") result.cascadedItems = cascadedItems;
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Count-only dry run for the Admin preview screen — uses the SAME
+// isRowArchiveEligible helper as the real write path (archiveSheetFYs), so
+// the preview and the actual run can never disagree. No writes of any kind.
+function archivePreview(yearsToKeep) {
+  const ss      = SpreadsheetApp.openById(CONFIG.SHEET_ID);
+  const keepFYs = currentAndRecentFYs(yearsToKeep);
+  return ARCHIVABLE_SHEETS.map(sheetName => {
+    const ws     = getSheet(sheetName, ss);
+    const values = ws.getDataRange().getValues();
+    if (values.length <= 1) return { sheet: sheetName, totalRows: 0, eligibleToArchive: 0, skippedOpen: 0 };
+    const headers  = values[0];
+    const dataRows = values.slice(1);
+    const fyCol    = headers.indexOf("FY");
+    let eligible = 0, skippedOpen = 0;
+    dataRows.forEach(row => {
+      if (isRowArchiveEligible(sheetName, row, headers, keepFYs)) { eligible++; return; }
+      const inKeepWindow = fyCol > -1 && keepFYs.has(String(row[fyCol]));
+      if (!inKeepWindow) skippedOpen++;
+    });
+    return { sheet: sheetName, totalRows: dataRows.length, eligibleToArchive: eligible, skippedOpen };
+  });
+}
+
+// Appends one row per sheet result to "Archive Log" — the audit trail
+// proving what happened and when for a destructive-adjacent operation.
+function logArchiveRun(results, yearsToKeep, runBy, ss) {
+  const ws = getSheet("Archive Log", ss);
+  const at = timestamp();
+  const rows = results.map(r => [at, runBy || "Unknown", yearsToKeep, r.sheet, r.archived, r.kept, r.skippedOpen]);
+  if (rows.length) ws.getRange(ws.getLastRow() + 1, 1, rows.length, 7).setValues(rows);
+}
+
+// Runs archiveSheetFYs across every ARCHIVABLE_SHEETS entry and logs the
+// combined result. This is the real, destructive-adjacent entry point —
+// called only from doPost's admin-gated "archiveFY" action.
+function archiveAllOldFYs(yearsToKeep, runBy) {
+  const ss = SpreadsheetApp.openById(CONFIG.SHEET_ID);
+  const results = ARCHIVABLE_SHEETS.map(name => archiveSheetFYs(name, yearsToKeep, ss));
+  logArchiveRun(results, yearsToKeep, runBy, ss);
+  return results;
+}
+
 // ─── AUTO-SERIAL GENERATOR ─────────────────────────────────────────────────────
 // Locked end-to-end: without this, two people opening "New Invoice" around the
 // same moment (or one person leaving the form open while another saves) can
@@ -569,6 +890,16 @@ function doGet(e) {
       return jsonOut({ status:"ok", config: getAllConfig() });
     }
 
+    if (action === "archivePreview") {
+      // Admin-only, same as the real run — a Staff/CA passcode has no
+      // business seeing "how many old unpaid invoices exist" as a raw count
+      // outside their normal module views, even read-only.
+      const role = resolveRole(e.parameter.code);
+      if (role !== "admin") return jsonOut({ error: "Access denied — archiving preview is Admin only" });
+      const yearsToKeep = Number(e.parameter.yearsToKeep) || 2;
+      return jsonOut({ status:"ok", yearsToKeep, results: archivePreview(yearsToKeep) });
+    }
+
     if (action === "bulkRead") {
       // Batches several single-sheet reads into ONE Apps Script execution —
       // one openById() instead of N — for cases like an Admin login or an FY
@@ -619,6 +950,21 @@ function doGet(e) {
       return jsonOut({ error: `Access denied — your role does not have access to "${sheet}"` });
     }
 
+    // Defensive read for old deployments: an environment upgraded to the new
+    // frontend but not yet re-run through initAllSheets (see Phase 1) won't
+    // have the "Sales Invoice Items" tab yet. That must degrade to "no line
+    // items shown", not break the invoice view with a hard error — so this
+    // one sheet name gets a soft empty-result fallback instead of
+    // propagating getSheet()'s "Sheet not found" error like every other
+    // sheet does.
+    if (sheet === "Sales Invoice Items") {
+      try {
+        return jsonOut(readSheetData(sheet, fy));
+      } catch (e) {
+        return jsonOut({ status:"ok", sheet, fy, count:0, headers:[], data:[] });
+      }
+    }
+
     return jsonOut(readSheetData(sheet, fy));
 
   } catch(err) {
@@ -661,6 +1007,30 @@ function readSheetData(sheet, fy, ss) {
   });
 
   return { status:"ok", sheet, fy, count:data.length, headers, data };
+}
+
+// ─── SALES INVOICE ITEMS (line items) ──────────────────────────────────────────
+// Soft-deletes every "Sales Invoice Items" row matching invoiceNo — looked up
+// by the "Invoice No." string, never by row position (see the sheet's own
+// comment in SCHEMA for why). No-ops safely if the "Sales Invoice Items"
+// sheet doesn't exist yet (old, un-upgraded deployment) so callers — both
+// saveInvoiceItems' replace-on-edit step and the Sales Invoices delete
+// cascade — never throw just because Phase 1's init hasn't been re-run yet.
+function softDeleteInvoiceItems(invoiceNo) {
+  let ws;
+  try { ws = getSheet("Sales Invoice Items"); }
+  catch (e) { return; } // old deployment — nothing to cascade into
+  const values = ws.getDataRange().getValues();
+  if (values.length <= 1) return;
+  const headers  = values[0];
+  const invNoCol = headers.indexOf("Invoice No.");
+  const delCol   = headers.indexOf("Deleted");
+  if (invNoCol === -1 || delCol === -1) return;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][invNoCol] === invoiceNo && values[i][delCol] !== true) {
+      ws.getRange(i + 1, delCol + 1).setValue(true);
+    }
+  }
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -715,6 +1085,58 @@ function doPost(e) {
       if (!configKey) return jsonOut({ error:"configKey required for setConfig" });
       setConfig(configKey, value, notes);
       return jsonOut({ status:"ok", action:"setConfig", configKey });
+    }
+
+    if (action === "saveInvoiceItems") {
+      // Same role gating as every other write below (CA read-only, role
+      // must have the sheet in its module list) — done explicitly here
+      // rather than falling through to the generic `sheet`-based checks
+      // further down, because this action's payload has no top-level
+      // `sheet` field (it writes "Sales Invoice Items" implicitly).
+      if (READONLY_ROLES.includes(role)) {
+        return jsonOut({ error: "Access denied — your role is read-only" });
+      }
+      if (!sheetAllowedForRole(role, "Sales Invoice Items")) {
+        return jsonOut({ error: `Access denied — your role does not have access to "Sales Invoice Items"` });
+      }
+      const { invoiceNo, fy, items } = payload;
+      if (!invoiceNo) return jsonOut({ error: "invoiceNo required for saveInvoiceItems" });
+      if (!Array.isArray(items)) return jsonOut({ error: "items array required for saveInvoiceItems" });
+
+      const itemsWs = getSheet("Sales Invoice Items");
+      const headers = itemsWs.getRange(1, 1, 1, itemsWs.getLastColumn()).getValues()[0];
+
+      // Validate every row BEFORE touching the sheet — a bad row (e.g. a
+      // schema-drift bug in the frontend's buildInvoiceItemRow) must not
+      // soft-delete the old, still-good rows and then fail on the new
+      // ones, which would leave the invoice with NO live item rows at all.
+      for (const itemRow of items) {
+        if (!Array.isArray(itemRow) || itemRow.length !== headers.length) {
+          return jsonOut({ error: `Item row has ${Array.isArray(itemRow)?itemRow.length:"?"} cols but sheet has ${headers.length}. Check buildInvoiceItemRow() in utils.js` });
+        }
+      }
+
+      // Replace-on-edit: soft-delete the invoice's existing item rows first,
+      // THEN append the fresh set — so an edit that removes a line item
+      // doesn't leave that item's old row looking live (see SCHEMA comment).
+      softDeleteInvoiceItems(invoiceNo);
+
+      if (items.length) {
+        itemsWs.getRange(itemsWs.getLastRow() + 1, 1, items.length, headers.length).setValues(items);
+      }
+      return jsonOut({ status: "ok", action: "savedInvoiceItems", count: items.length });
+    }
+
+    if (action === "archiveFY") {
+      // Admin-only, same reasoning as setConfig above — this moves and
+      // removes rows across multiple sheets at once, the most
+      // destructive-adjacent write path in the app.
+      if (role !== "admin") {
+        return jsonOut({ error: "Access denied — archiving is Admin only" });
+      }
+      const yearsToKeep = Number(payload.yearsToKeep) || 2;
+      const results = archiveAllOldFYs(yearsToKeep, payload.runBy || "Admin");
+      return jsonOut({ status: "ok", action: "archived", yearsToKeep, results });
     }
 
     // Every other write (append/update/delete) touches a specific sheet — CA
@@ -775,12 +1197,30 @@ function doPost(e) {
       // Soft delete: mark as Deleted rather than remove row
       const headers = ws.getRange(1,1,1,ws.getLastColumn()).getValues()[0];
       const statusCol = headers.indexOf("Status");
+
+      // Cascade prep: capture the Invoice No. BEFORE any mutation below —
+      // "Sales Invoices" has no "Status" column, so its delete falls into
+      // the hard-delete branch (ws.deleteRow), which would shift rows and
+      // make a post-delete read of this cell read the wrong row entirely.
+      // Looked up by Invoice No. string, never by row position.
+      let cascadeInvoiceNo = null;
+      if (sheet === "Sales Invoices") {
+        const invNoCol = headers.indexOf("Invoice No.");
+        if (invNoCol > -1) cascadeInvoiceNo = ws.getRange(rowIndex, invNoCol+1).getValue();
+      }
+
       if (statusCol > -1) {
         ws.getRange(rowIndex, statusCol+1).setValue("Deleted");
         ws.getRange(rowIndex, 1, 1, headers.length).setFontColor("#999999");
       } else {
         ws.deleteRow(rowIndex); // hard delete only if no Status column
       }
+
+      // Cascade: deleting a Sales Invoice must also soft-delete its line
+      // items, or those item rows would keep showing up as an orphaned
+      // item table with no invoice behind it.
+      if (cascadeInvoiceNo) softDeleteInvoiceItems(cascadeInvoiceNo);
+
       return jsonOut({ status:"ok", action:"deleted", sheet, rowIndex });
     }
 
@@ -1048,7 +1488,7 @@ function initAllSheets() {
   }
 
   // Sort sheets in logical order
-  const order = ["Dashboard","Jobs","Sales Invoices","Purchase Invoices","Quotations","Clients","Vendors","Inventory","Expenses","Petty Cash","Ledger","TDS","Fixed Assets","FD Tracker","Document Vault","Attendance","Vehicles","Config"];
+  const order = ["Dashboard","Jobs","Sales Invoices","Sales Invoice Items","Purchase Invoices","Quotations","IndiaMART Leads","Clients","Vendors","Inventory","Expenses","Petty Cash","Ledger","TDS","Fixed Assets","FD Tracker","Document Vault","Attendance","Vehicles","Archive Log","Config"];
   order.forEach((name, idx) => {
     const ws = ss.getSheetByName(name);
     if (ws) ss.setActiveSheet(ws);
@@ -1184,4 +1624,19 @@ function setupTriggers() {
 
   Logger.log("Triggers set: dailyAlerts (8AM daily), monthlyReport (1st of month 9AM)");
   SpreadsheetApp.getUi().alert("✅ Triggers set successfully!\n• Daily alert: 8:00 AM every day\n• Monthly report: 1st of each month at 9:00 AM");
+}
+
+// ─── TEST HOOK (safe no-op inside Apps Script) ───────────────────────────────
+// Apps Script's V8 runtime has no `module`/`require` global, so this block
+// never executes in a real deployment — it exists purely so the Node/Vitest
+// suite (src/shared/archiveBackend.test.js) can exercise the ACTUAL archiving
+// functions above directly, instead of duplicating their logic in a second,
+// driftable copy. If you add new archiving functions above, add them here too.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    ARCHIVABLE_SHEETS, ARCHIVE_STATUS_GUARD, SCHEMA,
+    currentAndRecentFYs, isRowArchiveEligible,
+    archiveSheetFYs, archivePreview, archiveAllOldFYs,
+    detectFY,
+  };
 }

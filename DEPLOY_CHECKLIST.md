@@ -1,6 +1,6 @@
 # Deploy Checklist — KE Business Suite v5
 
-Code is verified deployment-ready: build passes, all 61 tests pass, the
+Code is verified deployment-ready: build passes, all 88 tests pass, the
 edit-save persistence bug is fixed. What's left is filling in *your*
 credentials — nothing here needs further coding.
 
@@ -57,3 +57,11 @@ in this zip — just make sure both files end up with the *same* value.
 ## Notes
 - `VITE_API_KEY` is a deterrent against casual scraping, not real auth — actual access control is the per-request passcode check in `resolveRole()` server-side. Don't reuse Admin/Staff/CA passcodes as the API key.
 - If you ever see "Setup incomplete" errors after deploying, it means a placeholder (`SHEET_ID` or `API_KEY`) is still literally in the code — go back and fill it in.
+
+## Upgrading an existing (already-deployed) Sheet to add FY Archiving
+If you're pasting this version of `apps-script-backend.js` over an
+already-running deployment rather than doing first-time setup above:
+- [ ] Apps Script → replace the file contents → Run → `initAllSheets` again (idempotent — only adds the new "Archive Log" tab, doesn't touch existing data)
+- [ ] Deploy → Manage Deployments → Edit → **New Version** (a code change doesn't take effect on the live `/exec` URL until you cut a new version)
+- [ ] Log in as Admin → open **FY Archiving** in the sidebar → confirm the preview loads before ever pressing "Run Archiving"
+- [ ] Before the FIRST real (non-test) run on your production Sheet: manually duplicate each sheet you're about to archive as a backup tab, and run when no one else has the app open
